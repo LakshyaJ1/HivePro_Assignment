@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,7 @@ class RetrievalConfig:
     embedding_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
     embedding_model_local_files_only: bool = True
     chroma_collection_name: str = "nist_sp800_53_rev5_controls"
+    chroma_persist_dir: Path | str = "/tmp/chroma_tawasolpay"
     semantic_candidate_count: int = 30
     final_candidate_count: int = 5
     batch_size: int = 64

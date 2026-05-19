@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -57,7 +59,7 @@ class NistHybridRetriever:
 
     Architecture:
     1. Embed every NIST control with sentence-transformers/all-MiniLM-L6-v2.
-    2. Store embeddings in an in-memory Chroma collection.
+    2. Store embeddings in a persistent Chroma collection under /tmp.
     3. Query semantically from the scored risk context.
     4. Re-rank candidates with BM25 and deterministic control-family priors.
     """
@@ -77,18 +79,16 @@ class NistHybridRetriever:
             self.config.embedding_model_name,
             local_files_only=self.config.embedding_model_local_files_only,
         )
-        self.client = chromadb.EphemeralClient(
-            settings=Settings(anonymized_telemetry=False)
-        )
-        self.collection = self.client.get_or_create_collection(
-            name=self.config.chroma_collection_name,
-            metadata={"hnsw:space": "cosine"},
-        )
-        self._build_collection()
+        self.chroma_persist_dir = _resolve_chroma_persist_dir(self.config.chroma_persist_dir)
+        self.chroma_persist_dir.mkdir(parents=True, exist_ok=True)
+        self.client = self._new_chroma_client()
+        self.collection = self._get_or_create_collection()
+        self._ensure_collection_ready()
         logger.info(
-            "NIST retriever initialized: %d controls indexed, model=%s",
+            "NIST retriever initialized: %d controls indexed, model=%s, chroma_dir=%s",
             len(controls),
             self.config.embedding_model_name,
+            self.chroma_persist_dir,
         )
 
     def retrieve(self, risk: pd.Series | dict[str, Any]) -> RetrievalResult:
@@ -151,11 +151,26 @@ class NistHybridRetriever:
             normalize_embeddings=True,
             show_progress_bar=False,
         )[0].tolist()
-        results = self.collection.query(
-            query_embeddings=[query_embedding],
-            n_results=self.config.semantic_candidate_count,
-            include=["distances", "metadatas"],
-        )
+        try:
+            results = self.collection.query(
+                query_embeddings=[query_embedding],
+                n_results=self.config.semantic_candidate_count,
+                include=["distances", "metadatas"],
+            )
+        except Exception as exc:
+            logger.warning(
+                "Chroma query failed; rebuilding persistent NIST collection: %s",
+                exc,
+                exc_info=True,
+            )
+            self.collection = self._recreate_collection()
+            self._build_collection()
+            self._verify_collection_populated()
+            results = self.collection.query(
+                query_embeddings=[query_embedding],
+                n_results=self.config.semantic_candidate_count,
+                include=["distances", "metadatas"],
+            )
 
         ids = results.get("ids", [[]])[0]
         distances = results.get("distances", [[]])[0]
@@ -169,6 +184,66 @@ class NistHybridRetriever:
                 }
             )
         return candidates
+
+    def _new_chroma_client(self):
+        return chromadb.PersistentClient(
+            path=str(self.chroma_persist_dir),
+            settings=Settings(anonymized_telemetry=False),
+        )
+
+    def _get_or_create_collection(self):
+        return self.client.get_or_create_collection(
+            name=self.config.chroma_collection_name,
+            metadata={"hnsw:space": "cosine"},
+        )
+
+    def _ensure_collection_ready(self) -> None:
+        try:
+            count = self.collection.count()
+        except Exception as exc:
+            logger.warning(
+                "Chroma collection health check failed; recreating collection: %s",
+                exc,
+                exc_info=True,
+            )
+            self.collection = self._recreate_collection()
+            self._build_collection()
+            self._verify_collection_populated()
+            return
+
+        expected_count = len(self.controls)
+        if count == expected_count:
+            return
+
+        if count == 0:
+            logger.info("Chroma collection is empty; building NIST collection")
+        else:
+            logger.warning(
+                "Chroma collection has %d controls, expected %d; rebuilding collection",
+                count,
+                expected_count,
+            )
+            self.collection = self._recreate_collection()
+
+        self._build_collection()
+        self._verify_collection_populated()
+
+    def _recreate_collection(self):
+        try:
+            self.client.delete_collection(name=self.config.chroma_collection_name)
+        except Exception:
+            logger.info("No existing Chroma collection to delete before rebuild", exc_info=True)
+        return self._get_or_create_collection()
+
+    def _verify_collection_populated(self) -> None:
+        try:
+            count = self.collection.count()
+        except Exception as exc:
+            raise RetrievalIndexError(
+                f"Chroma collection verification failed after rebuild: {exc}"
+            ) from exc
+        if count == 0:
+            raise RetrievalIndexError("Chroma collection rebuild completed with zero indexed controls")
 
     def _rerank(
         self,
@@ -295,3 +370,10 @@ def _base_control_order(control_id: str) -> int:
         return len(preferred) - preferred.index(base)
     except ValueError:
         return 0
+
+
+def _resolve_chroma_persist_dir(path: Path | str) -> Path:
+    configured = Path(path)
+    if os.name == "nt" and str(configured).replace("\\", "/") == "/tmp/chroma_tawasolpay":
+        return Path.cwd() / ".chroma" / "chroma_tawasolpay"
+    return configured
