@@ -1,0 +1,11 @@
+[theme]
+base = "light"
+primaryColor = "#0d9488" # Modern teal (Tailwind teal-600)
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f8fafc" # Crisp, subtle slate-50 background
+textColor = "#0f172a" # Deep slate for better readability
+font = "sans serif"
+
+[server]
+headless = true
+enableXsrfProtection = true

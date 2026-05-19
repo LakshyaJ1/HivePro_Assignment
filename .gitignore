@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.env
+.streamlit/secrets.toml
+
+# Runtime-downloaded public reference data. Rebuilt/cached by ingestion code.
+data/external/
+
+# Generated reports. Recreate with scripts/run_phase5.ps1.
+reports/
